@@ -39,6 +39,7 @@ import com.sk89q.worldedit.world.block.BaseBlock;
 import com.sk89q.worldedit.world.block.BlockStateHolder;
 import com.sk89q.worldedit.world.weather.WeatherType;
 import com.sk89q.worldedit.world.weather.WeatherTypes;
+import org.bukkit.Bukkit;
 import org.bukkit.Effect;
 import org.bukkit.TreeType;
 import org.bukkit.World;
@@ -54,12 +55,8 @@ import org.slf4j.Logger;
 import javax.annotation.Nullable;
 import java.lang.ref.WeakReference;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.EnumMap;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
@@ -83,6 +80,21 @@ public class BukkitWorld extends AbstractWorld {
      */
     public BukkitWorld(World world) {
         this.worldRef = new WeakReference<>(world);
+        if (!isSetBlockConsumerStarted) {
+            isSetBlockConsumerStarted = true;
+            Bukkit.getScheduler().runTaskTimer(WorldEditPlugin.getInstance(), () -> {
+                final long end = System.currentTimeMillis() + 10;
+                while (System.currentTimeMillis() <= end) {
+                    if (setBlockQueue.isEmpty()) {
+                        break;
+                    }
+                    final Runnable poll = setBlockQueue.poll();
+                    if (poll != null) {
+                        poll.run();
+                    }
+                }
+            }, 1, 1);
+        }
     }
 
     @Override
@@ -413,27 +425,31 @@ public class BukkitWorld extends AbstractWorld {
         return BukkitAdapter.adapt(bukkitBlock.getBlockData());
     }
 
+    private static final ArrayDeque<Runnable> setBlockQueue = new ArrayDeque<>();
+    private static boolean isSetBlockConsumerStarted = false;
+
     @Override
     public <B extends BlockStateHolder<B>> boolean setBlock(BlockVector3 position, B block, boolean notifyAndLight) throws WorldEditException {
-        BukkitImplAdapter adapter = WorldEditPlugin.getInstance().getBukkitImplAdapter();
-        if (adapter != null) {
-            try {
-                return adapter.setBlock(BukkitAdapter.adapt(getWorld(), position), block, notifyAndLight);
-            } catch (Exception e) {
-                if (block instanceof BaseBlock && ((BaseBlock) block).getNbtData() != null) {
-                    logger.warn("Tried to set a corrupt tile entity at " + position.toString());
-                    logger.warn(((BaseBlock) block).getNbtData().toString());
+        setBlockQueue.add(() -> {
+            BukkitImplAdapter adapter = WorldEditPlugin.getInstance().getBukkitImplAdapter();
+            if (adapter != null) {
+                try {
+                    adapter.setBlock(BukkitAdapter.adapt(getWorld(), position), block, notifyAndLight);
+                } catch (Exception e) {
+                    if (block instanceof BaseBlock && ((BaseBlock) block).getNbtData() != null) {
+                        logger.warn("Tried to set a corrupt tile entity at " + position.toString());
+                        logger.warn(((BaseBlock) block).getNbtData().toString());
+                    }
+                    e.printStackTrace();
+                    Block bukkitBlock = getWorld().getBlockAt(position.getBlockX(), position.getBlockY(), position.getBlockZ());
+                    bukkitBlock.setBlockData(BukkitAdapter.adapt(block), notifyAndLight);
                 }
-                e.printStackTrace();
+            } else {
                 Block bukkitBlock = getWorld().getBlockAt(position.getBlockX(), position.getBlockY(), position.getBlockZ());
                 bukkitBlock.setBlockData(BukkitAdapter.adapt(block), notifyAndLight);
-                return true;
             }
-        } else {
-            Block bukkitBlock = getWorld().getBlockAt(position.getBlockX(), position.getBlockY(), position.getBlockZ());
-            bukkitBlock.setBlockData(BukkitAdapter.adapt(block), notifyAndLight);
-            return true;
-        }
+        });
+        return true;
     }
 
     @Override
